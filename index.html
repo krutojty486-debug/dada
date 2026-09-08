@@ -53,10 +53,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
  * Tank metrics. Interior spans x[-W/2,W/2], z[-D/2,D/2], y[0,H].
  * ------------------------------------------------------------------ */
 const TANK = { W: 6, D: 3, H: 4, glass: 0.08, gravel: 0.26, water: 3.66 };
-const CENTER = new THREE.Vector3(0, TANK.H * 0.5, 0);
+const CENTER = new THREE.Vector3(0, TANK.H * 0.46, 0);
 
 const uTime = { value: 0 };                     // shared clock uniform
-const swayMaterials = [];                       // materials needing per-frame uniforms
 
 /* ---------------------------------- renderer / scene / camera ------ */
 const container = document.getElementById('app');
@@ -73,13 +72,13 @@ container.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 
 const camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.1, 200);
-camera.position.set(5.4, 3.9, 7.2);
+camera.position.set(5.0, 3.4, 6.6);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.target.copy(CENTER);
 controls.enableDamping = true;
 controls.dampingFactor = 0.06;
-controls.minDistance = 3.2;
+controls.minDistance = 2.6;
 controls.maxDistance = 18;
 controls.maxPolarAngle = Math.PI * 0.505;   // never dip under the stand
 controls.update();
@@ -103,7 +102,7 @@ function buildEnvironment() {
     new THREE.SphereGeometry(20, 24, 16),
     new THREE.ShaderMaterial({
       side: THREE.BackSide,
-      uniforms: { uTop: { value: new THREE.Color(0x33566f) }, uBottom: { value: new THREE.Color(0x060c15) } },
+      uniforms: { uTop: { value: new THREE.Color(0x3d6480) }, uBottom: { value: new THREE.Color(0x060c15) } },
       vertexShader: `varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
       fragmentShader: `
         uniform vec3 uTop; uniform vec3 uBottom; varying vec3 vP;
@@ -112,19 +111,20 @@ function buildEnvironment() {
   );
   envScene.add(dome);
 
-  // Soft overhead "room" panel + two cool side bounces give the glass believable highlights.
+  // Soft overhead "room" panel plus cool side bounces give the glass believable highlights.
   const panel = (w, h, d, color, pos) => {
     const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshBasicMaterial({ color }));
     m.position.copy(pos);
     envScene.add(m);
   };
   panel(11, 0.4, 7, 0xfff3d6, new THREE.Vector3(0, 9, 0));
-  panel(0.4, 8, 9, 0x1b4b73, new THREE.Vector3(-11, 3, 0));
-  panel(0.4, 8, 9, 0x14324d, new THREE.Vector3(11, 3, 0));
+  panel(0.4, 8, 9, 0x21587f, new THREE.Vector3(-11, 3, 0));
+  panel(0.4, 8, 9, 0x17394f, new THREE.Vector3(11, 3, 0));
   panel(9, 6, 0.4, 0x0d2438, new THREE.Vector3(0, 2, -11));
 
   const pmrem = new THREE.PMREMGenerator(renderer);
-  const texture = pmrem.fromScene(envScene, 0.05).texture;
+  // 0.04 stays inside PMREM's sample budget (0.05 clips with a console warning)
+  const texture = pmrem.fromScene(envScene, 0.04).texture;
   pmrem.dispose();
   dome.geometry.dispose();
   dome.material.dispose();
@@ -152,11 +152,10 @@ scene.environment = buildEnvironment();
         ${CAUSTIC_GLSL}
         void main(){
           vec3 dir = normalize(vP);
-          float h = smoothstep(-0.55, 0.75, dir.y);
-          vec3 col = mix(uBottom, uTop, h);
+          vec3 col = mix(uBottom, uTop, smoothstep(-0.55, 0.75, dir.y));
           // lazy caustic wash so the backdrop breathes like light through water
           float c = causticPattern(dir.xz * 26.0 + vec2(0.0, dir.y * 16.0), uTime * 0.35);
-          col += uGlow * c * 0.06 * smoothstep(-0.2, 0.9, dir.y);
+          col += uGlow * c * 0.07 * smoothstep(-0.2, 0.9, dir.y);
           gl_FragColor = vec4(col, 1.0);
           #include <tonemapping_fragment>
           #include <colorspace_fragment>
@@ -168,8 +167,7 @@ scene.environment = buildEnvironment();
 }
 
 /* ---------------------------------- lighting ------------------------ */
-const ambient = new THREE.AmbientLight(0xb3e5fc, 0.4);
-scene.add(ambient);
+scene.add(new THREE.AmbientLight(0xb3e5fc, 0.4));
 
 const sun = new THREE.DirectionalLight(0xfff8e1, 1.0);
 sun.position.set(4.5, 9.5, 6.5);
@@ -191,7 +189,7 @@ lamp.position.set(0, TANK.H - 0.35, 0);
 scene.add(lamp);
 
 // cool fill from the front so the fish flanks never go flat
-const fill = new THREE.DirectionalLight(0x81d4fa, 0.25);
+const fill = new THREE.DirectionalLight(0x81d4fa, 0.28);
 fill.position.set(-5, 2.5, 8);
 scene.add(fill);
 
@@ -209,7 +207,12 @@ const glassMaterial = new THREE.MeshPhysicalMaterial({
   clearcoat: 1,
   clearcoatRoughness: 0.03,
   envMapIntensity: 1.4,
-  side: THREE.DoubleSide
+  // FrontSide is deliberate: each panel is a closed slab, so its outward faces
+  // are all we need — and DoubleSide would make three.js re-init this shared
+  // shader twice per panel per frame in the transmission pass.
+  side: THREE.FrontSide,
+  // panels must not occlude the water volume, bubbles or god rays drawn after them
+  depthWrite: false
 });
 
 const tank = new THREE.Group();
@@ -239,7 +242,6 @@ scene.add(tank);
     m.castShadow = true;
     m.receiveShadow = true;
     tank.add(m);
-    return m;
   };
   const lenX = W + 2 * g + 2 * rimT, lenZ = D + 2 * g + 2 * rimT;
   for (const y of [H - rimH / 2, rimH / 2 - g]) {
@@ -251,7 +253,6 @@ scene.add(tank);
   const postGeo = new THREE.BoxGeometry(rimT, H - rimH * 1.6, rimT);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) rail(postGeo, sx * ow, H / 2, sz * od);
 
-  // stand
   const stand = new THREE.Mesh(
     new THREE.BoxGeometry(W + 0.9, 0.34, D + 0.9),
     new THREE.MeshStandardMaterial({ color: 0x1c1714, roughness: 0.75, metalness: 0.05 })
@@ -263,8 +264,10 @@ scene.add(tank);
 }
 
 /* ---------------------------------- gravel bed + stones ------------- */
+const rand = (a, b) => a + Math.random() * (b - a);
+
 {
-  const bedMat = new THREE.MeshStandardMaterial({ color: 0x8d7256, roughness: 0.92, metalness: 0 });
+  const bedMat = new THREE.MeshStandardMaterial({ color: 0x7d6549, roughness: 0.92, metalness: 0 });
   bedMat.customProgramCacheKey = () => 'gravelBedCaustics';
   bedMat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = uTime;
@@ -275,8 +278,8 @@ scene.add(tank);
     shader.fragmentShader = `uniform float uTime;\nvarying vec3 vWPos;\n${CAUSTIC_GLSL}\n` + shader.fragmentShader.replace(
       '#include <emissivemap_fragment>',
       `#include <emissivemap_fragment>
-       float caus = causticPattern(vWPos.xz, uTime * 0.8) + 0.55 * causticPattern(vWPos.xz * 1.9 + 3.1, uTime * 0.55);
-       totalEmissiveRadiance += vec3(0.30, 0.62, 0.72) * caus * 0.55;`
+       float caus = causticPattern(vWPos.xz, uTime * 0.8) + 0.5 * causticPattern(vWPos.xz * 1.9 + 3.1, uTime * 0.55);
+       totalEmissiveRadiance += vec3(0.20, 0.46, 0.56) * caus * 0.34;`
     );
   };
 
@@ -286,10 +289,8 @@ scene.add(tank);
   scene.add(bed);
 
   const stoneColors = [0x8d6e63, 0xa1887f, 0x9e9e9e, 0x6d4c41, 0xbcaaa4, 0x7d7d7d];
-  const rand = (a, b) => a + Math.random() * (b - a);
 
   // 22 rounded stones: a few hero rocks, the rest pebble-sized
-  const stones = new THREE.Group();
   for (let i = 0; i < 22; i++) {
     const big = i < 5;
     const r = big ? rand(0.19, 0.30) : rand(0.055, 0.14);
@@ -313,30 +314,28 @@ scene.add(tank);
     stone.rotation.set(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
     stone.position.set(
       rand(-TANK.W / 2 + 0.35, TANK.W / 2 - 0.35),
-      TANK.gravel + r * 0.32,
+      TANK.gravel + r * 0.30,
       rand(-TANK.D / 2 + 0.3, TANK.D / 2 - 0.3)
     );
     stone.castShadow = true;
     stone.receiveShadow = true;
-    stones.add(stone);
+    scene.add(stone);
   }
-  scene.add(stones);
 
   // fine gravel scatter (instanced) so the bed reads as grains, not a slab
-  const grainGeo = new THREE.DodecahedronGeometry(0.045, 0);
   const grains = new THREE.InstancedMesh(
-    grainGeo,
+    new THREE.DodecahedronGeometry(0.045, 0),
     new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0 }),
-    260
+    280
   );
-  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), s = new THREE.Vector3(), p = new THREE.Vector3();
-  const c = new THREE.Color();
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  const s = new THREE.Vector3(), p = new THREE.Vector3(), c = new THREE.Color();
   for (let i = 0; i < grains.count; i++) {
-    p.set(rand(-TANK.W / 2 + 0.12, TANK.W / 2 - 0.12), TANK.gravel - 0.005, rand(-TANK.D / 2 + 0.1, TANK.D / 2 - 0.1));
+    p.set(rand(-TANK.W / 2 + 0.1, TANK.W / 2 - 0.1), TANK.gravel - 0.008, rand(-TANK.D / 2 + 0.09, TANK.D / 2 - 0.09));
     e.set(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
     s.set(rand(0.6, 1.5), rand(0.3, 0.6), rand(0.6, 1.5));
     grains.setMatrixAt(i, m4.compose(p, q.setFromEuler(e), s));
-    grains.setColorAt(i, c.setHex(stoneColors[(Math.random() * stoneColors.length) | 0]).offsetHSL(0, 0, rand(-0.05, 0.05)));
+    grains.setColorAt(i, c.setHex(stoneColors[(Math.random() * stoneColors.length) | 0]).offsetHSL(0, 0, rand(-0.06, 0.04)));
   }
   grains.instanceMatrix.needsUpdate = true;
   grains.receiveShadow = true;
@@ -345,33 +344,38 @@ scene.add(tank);
 
 /* ---------------------------------- aquatic plants ------------------ */
 function makeBladeGeometry(h, w) {
-  const geo = new THREE.PlaneGeometry(w, h, 2, 10);
+  const geo = new THREE.PlaneGeometry(w, h, 2, 12);
   const pos = geo.attributes.position;
   for (let i = 0; i < pos.count; i++) {
     const y = pos.getY(i);
-    const t = (y + h / 2) / h;                       // 0 at base, 1 at tip
-    pos.setX(i, pos.getX(i) * (1 - 0.86 * Math.pow(t, 1.35)));
-    pos.setY(i, y + h / 2);                          // pivot at the base
-    pos.setZ(i, Math.pow(t, 2.1) * h * 0.14);        // natural forward arc
+    // clamp: at the base row (y + h/2) can land marginally negative, and
+    // Math.pow(negative, fractional) is NaN, which poisons the whole geometry
+    const t = THREE.MathUtils.clamp((y + h / 2) / h, 0, 1);
+    const taper = (1.0 - 0.82 * Math.pow(t, 1.4)) * (0.55 + 0.45 * Math.sin(Math.min(t, 0.35) / 0.35 * 1.57));
+    pos.setX(i, pos.getX(i) * taper);
+    pos.setY(i, t * h);                              // pivot at the base
+    pos.setZ(i, Math.pow(t, 2.1) * h * 0.13);        // natural forward arc
   }
   geo.computeVertexNormals();
   return geo;
 }
 
 function makeBlade(color, h, w, phase) {
-  const mat = new THREE.MeshStandardMaterial({
-    color, side: THREE.DoubleSide, roughness: 0.62, metalness: 0,
+  // MeshPhysicalMaterial: sheen gives the blades a waxy leaf highlight
+  // (sheen is not a MeshStandardMaterial property).
+  const mat = new THREE.MeshPhysicalMaterial({
+    color, side: THREE.DoubleSide, roughness: 0.6, metalness: 0,
     sheen: 0.5, sheenColor: new THREE.Color(0x9ccc65)
   });
   mat.customProgramCacheKey = () => 'plantSway';
-  mat.userData.uniforms = {
+  const uniforms = {
     uPhase: { value: phase },
     uHeight: { value: h },
-    uAmp: { value: h * 0.14 + Math.random() * 0.05 },
+    uAmp: { value: h * 0.085 + Math.random() * 0.03 },
     uFreq: { value: 0.55 + Math.random() * 0.35 }
   };
   mat.onBeforeCompile = (shader) => {
-    Object.assign(shader.uniforms, { uTime }, mat.userData.uniforms);
+    Object.assign(shader.uniforms, { uTime }, uniforms);
     shader.vertexShader = `
       uniform float uTime; uniform float uPhase; uniform float uHeight; uniform float uAmp; uniform float uFreq;
     ` + shader.vertexShader.replace(
@@ -385,7 +389,6 @@ function makeBlade(color, h, w, phase) {
        transformed.y -= abs(bend) * 0.18;`
     );
   };
-  swayMaterials.push(mat);
 
   const mesh = new THREE.Mesh(makeBladeGeometry(h, w), mat);
   mesh.castShadow = true;
@@ -394,20 +397,18 @@ function makeBlade(color, h, w, phase) {
 
 {
   const greens = [0x2e7d32, 0x388e3c, 0x1b5e20, 0x4caf50, 0x33691e];
-  const rand = (a, b) => a + Math.random() * (b - a);
-  const spots = [
-    [-2.25, -1.0], [-1.1, -1.15], [2.3, -1.05], [1.35, -1.2], [-2.5, 0.75], [2.55, 0.6]
-  ];
+  // back edge and corners, kept clear of the glass even at full sway
+  const spots = [[-2.15, -1.02], [-1.05, -1.15], [2.2, -1.06], [1.2, -1.2], [-2.3, 0.72], [2.32, 0.6]];
   for (const [x, z] of spots) {
     const cluster = new THREE.Group();
-    cluster.position.set(x + rand(-0.12, 0.12), TANK.gravel - 0.02, z + rand(-0.1, 0.1));
+    cluster.position.set(x + rand(-0.1, 0.1), TANK.gravel - 0.04, z + rand(-0.08, 0.08));
     const n = 4 + ((Math.random() * 5) | 0);      // 4-8 blades
     for (let i = 0; i < n; i++) {
-      const h = rand(0.95, 2.35);
-      const blade = makeBlade(greens[(Math.random() * greens.length) | 0], h, rand(0.12, 0.22), rand(0, Math.PI * 2));
-      blade.position.set(rand(-0.2, 0.2), 0, rand(-0.16, 0.16));
+      const h = rand(1.05, 2.4);
+      const blade = makeBlade(greens[(Math.random() * greens.length) | 0], h, rand(0.13, 0.23), rand(0, Math.PI * 2));
+      blade.position.set(rand(-0.16, 0.16), 0, rand(-0.14, 0.14));
       blade.rotation.y = rand(0, Math.PI * 2);
-      blade.rotation.z = rand(-0.16, 0.16);
+      blade.rotation.z = rand(-0.14, 0.14);
       cluster.add(blade);
     }
     scene.add(cluster);
@@ -426,16 +427,16 @@ const FISH_COL = {
 function makeFishBodyGeometry() {
   // spline profile (radius, axis) revolved into an organic fish silhouette
   const pts = [
-    new THREE.Vector2(0.030, -0.50), new THREE.Vector2(0.055, -0.44), new THREE.Vector2(0.095, -0.34),
-    new THREE.Vector2(0.150, -0.22), new THREE.Vector2(0.198, -0.08), new THREE.Vector2(0.228, 0.04),
-    new THREE.Vector2(0.235, 0.15), new THREE.Vector2(0.222, 0.26), new THREE.Vector2(0.180, 0.36),
-    new THREE.Vector2(0.115, 0.44), new THREE.Vector2(0.045, 0.49), new THREE.Vector2(0.012, 0.505)
+    new THREE.Vector2(0.028, -0.50), new THREE.Vector2(0.050, -0.44), new THREE.Vector2(0.090, -0.34),
+    new THREE.Vector2(0.145, -0.22), new THREE.Vector2(0.192, -0.08), new THREE.Vector2(0.220, 0.04),
+    new THREE.Vector2(0.226, 0.15), new THREE.Vector2(0.214, 0.26), new THREE.Vector2(0.174, 0.36),
+    new THREE.Vector2(0.112, 0.44), new THREE.Vector2(0.044, 0.49), new THREE.Vector2(0.012, 0.505)
   ];
-  const curve = new THREE.SplineCurve(pts);
-  const profile = curve.getPoints(64).map((v) => new THREE.Vector2(Math.max(v.x, 0.004), v.y));
+  const profile = new THREE.SplineCurve(pts).getPoints(64)
+    .map((v) => new THREE.Vector2(Math.max(v.x, 0.004), v.y));
   const geo = new THREE.LatheGeometry(profile, 44);
   geo.rotateX(Math.PI / 2);          // body axis now runs along +Z (nose forward)
-  geo.scale(0.52, 1.18, 1.0);        // laterally compressed, slightly tall
+  geo.scale(0.46, 1.12, 1.0);        // laterally compressed, slightly deep-bodied
   geo.computeVertexNormals();
   return geo;
 }
@@ -443,8 +444,8 @@ const FISH_BODY_GEO = makeFishBodyGeometry();
 
 function makeFishBodyMaterial() {
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0xff6d00, roughness: 0.34, metalness: 0.03,
-    clearcoat: 0.7, clearcoatRoughness: 0.22, sheen: 0.35,
+    color: 0xff6d00, roughness: 0.32, metalness: 0.03,
+    clearcoat: 0.75, clearcoatRoughness: 0.2, sheen: 0.35,
     sheenColor: new THREE.Color(0xfff3e0), envMapIntensity: 0.9
   });
   mat.customProgramCacheKey = () => 'clownfishStripes';
@@ -479,22 +480,22 @@ function makeFishBodyMaterial() {
        vec3 baseCol = mix(uBody, uBelly, smoothstep(0.02, -0.24, vLocal.y));
        baseCol = mix(baseCol, uBack, smoothstep(0.08, 0.30, vLocal.y));
 
-       float bw = 0.024;                       // black border thickness
-       float aa = 0.009;
+       float bw = 0.022;                       // black border thickness
+       float aa = 0.008;
        float whiteMask = 0.0, blackMask = 0.0;
 
        // stripe 1 (behind the eye), 2 (mid body, tilted forward), 3 (caudal peduncle)
-       float d1 = abs(vLocal.z - (0.235 + vLocal.y * 0.10));
-       whiteMask = max(whiteMask, 1.0 - smoothstep(0.052 - aa, 0.052 + aa, d1));
-       blackMask = max(blackMask, 1.0 - smoothstep(0.052 + bw - aa, 0.052 + bw + aa, d1));
+       float d1 = abs(vLocal.z - (0.225 + vLocal.y * 0.10));
+       whiteMask = max(whiteMask, 1.0 - smoothstep(0.048 - aa, 0.048 + aa, d1));
+       blackMask = max(blackMask, 1.0 - smoothstep(0.048 + bw - aa, 0.048 + bw + aa, d1));
 
        float d2 = abs(vLocal.z + 0.020 - vLocal.y * 0.16);
-       whiteMask = max(whiteMask, 1.0 - smoothstep(0.070 - aa, 0.070 + aa, d2));
-       blackMask = max(blackMask, 1.0 - smoothstep(0.070 + bw - aa, 0.070 + bw + aa, d2));
+       whiteMask = max(whiteMask, 1.0 - smoothstep(0.062 - aa, 0.062 + aa, d2));
+       blackMask = max(blackMask, 1.0 - smoothstep(0.062 + bw - aa, 0.062 + bw + aa, d2));
 
        float d3 = abs(vLocal.z + 0.375);
-       whiteMask = max(whiteMask, 1.0 - smoothstep(0.042 - aa, 0.042 + aa, d3));
-       blackMask = max(blackMask, 1.0 - smoothstep(0.042 + bw - aa, 0.042 + bw + aa, d3));
+       whiteMask = max(whiteMask, 1.0 - smoothstep(0.038 - aa, 0.038 + aa, d3));
+       blackMask = max(blackMask, 1.0 - smoothstep(0.038 + bw - aa, 0.038 + bw + aa, d3));
 
        vec3 col = mix(baseCol, uBlack, blackMask);
        col = mix(col, uWhite, whiteMask);
@@ -504,28 +505,27 @@ function makeFishBodyMaterial() {
   return mat;
 }
 
-// Fin builder: 2D shape (+x = backwards, +y = up) becomes a vertical blade with X-facing normal.
-function finMesh(shapeBuilder, { plane = 'vertical', color = 0xff8a1f, edge = 0xfff3e0, edgeScale = 1.12 } = {}) {
+// Fin builder: 2D shape (+x = backwards, +y = up) becomes a blade with a cream edge band.
+function finMesh(shapeBuilder, { plane = 'vertical', color = 0xff8a1f, edge = 0xfff1dd, edgeScale = 1.08 } = {}) {
   const shape = new THREE.Shape();
   shapeBuilder(shape);
   const group = new THREE.Group();
 
   const build = (scale, mat) => {
-    const geo = new THREE.ShapeGeometry(shape, 14);
+    const geo = new THREE.ShapeGeometry(shape, 16);
     geo.scale(scale, scale, 1);
     if (plane === 'vertical') geo.rotateY(Math.PI / 2);   // shape +x -> -z, +y -> +y
     else geo.rotateX(Math.PI / 2);                        // shape +x -> +x, +y -> +z
     return new THREE.Mesh(geo, mat);
   };
 
+  // Fins stay opaque so they depth-sort correctly against the body; the cream
+  // edge sits marginally behind the orange face via polygon offset.
   const edgeMesh = build(edgeScale, new THREE.MeshPhysicalMaterial({
-    color: edge, side: THREE.DoubleSide, roughness: 0.4, metalness: 0,
-    transparent: true, opacity: 0.9
-  }));
-  const faceMesh = build(1.0, new THREE.MeshPhysicalMaterial({
-    color, side: THREE.DoubleSide, roughness: 0.34, metalness: 0,
-    transparent: true, opacity: 0.94, clearcoat: 0.5,
-    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2
+    color: edge, side: THREE.DoubleSide, roughness: 0.4, metalness: 0, sheen: 0.4
+  }));  const faceMesh = build(1.0, new THREE.MeshPhysicalMaterial({
+    color, side: THREE.DoubleSide, roughness: 0.3, metalness: 0, clearcoat: 0.55,
+    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3
   }));
   edgeMesh.castShadow = faceMesh.castShadow = true;
   group.add(edgeMesh, faceMesh);
@@ -544,108 +544,106 @@ function makeClownfish() {
 
   // ---- caudal fin (rounded-truncate, slightly forked)
   const tailPivot = new THREE.Group();
-  tailPivot.position.set(0, 0, -0.46);
-  const tail = finMesh((s) => {
-    s.moveTo(0, 0.05);
-    s.bezierCurveTo(0.10, 0.20, 0.24, 0.26, 0.34, 0.25);
-    s.bezierCurveTo(0.30, 0.12, 0.28, -0.12, 0.34, -0.25);
-    s.bezierCurveTo(0.24, -0.26, 0.10, -0.20, 0, -0.05);
-    s.lineTo(0, 0.05);
-  }, { edgeScale: 1.1 });
-  tailPivot.add(tail);
+  tailPivot.position.set(0, 0, -0.45);
+  tailPivot.add(finMesh((s) => {
+    s.moveTo(0, 0.06);
+    s.bezierCurveTo(0.12, 0.24, 0.30, 0.32, 0.42, 0.30);
+    s.bezierCurveTo(0.36, 0.14, 0.34, -0.14, 0.42, -0.30);
+    s.bezierCurveTo(0.30, -0.32, 0.12, -0.24, 0, -0.06);
+    s.lineTo(0, 0.06);
+  }));
   flex.add(tailPivot);
 
   // ---- dorsal fin (sail, base follows the back line)
   const dorsalPivot = new THREE.Group();
-  dorsalPivot.position.set(0, 0.19, 0.26);
-  const dorsal = finMesh((s) => {
+  dorsalPivot.position.set(0, 0.185, 0.27);
+  dorsalPivot.add(finMesh((s) => {
     s.moveTo(0, 0.02);
-    s.bezierCurveTo(0.06, 0.15, 0.16, 0.17, 0.26, 0.13);
-    s.bezierCurveTo(0.38, 0.09, 0.48, 0.02, 0.55, -0.08);
-    s.bezierCurveTo(0.40, -0.09, 0.18, -0.06, 0, 0.02);
-  }, { edgeScale: 1.06 });
-  dorsalPivot.add(dorsal);
+    s.bezierCurveTo(0.07, 0.18, 0.18, 0.20, 0.30, 0.16);
+    s.bezierCurveTo(0.42, 0.11, 0.52, 0.03, 0.58, -0.08);
+    s.bezierCurveTo(0.42, -0.10, 0.19, -0.06, 0, 0.02);
+  }, { edgeScale: 1.05 }));
   flex.add(dorsalPivot);
 
   // ---- anal fin
   const analPivot = new THREE.Group();
-  analPivot.position.set(0, -0.17, -0.06);
-  const anal = finMesh((s) => {
+  analPivot.position.set(0, -0.165, -0.06);
+  analPivot.add(finMesh((s) => {
     s.moveTo(0, -0.01);
-    s.bezierCurveTo(0.05, -0.13, 0.14, -0.15, 0.22, -0.11);
-    s.bezierCurveTo(0.30, -0.07, 0.33, -0.02, 0.34, 0.05);
-    s.bezierCurveTo(0.22, 0.03, 0.10, 0.02, 0, -0.01);
-  }, { edgeScale: 1.06 });
-  analPivot.add(anal);
+    s.bezierCurveTo(0.05, -0.15, 0.15, -0.17, 0.24, -0.12);
+    s.bezierCurveTo(0.32, -0.08, 0.35, -0.02, 0.36, 0.05);
+    s.bezierCurveTo(0.23, 0.03, 0.10, 0.02, 0, -0.01);
+  }, { edgeScale: 1.05 }));
   flex.add(analPivot);
 
-  // ---- pectoral fins (horizontal blades, +x outward / -y backwards in shape space)
+  // ---- pectoral fins (horizontal blades)
   const pectorals = [];
   for (const side of [1, -1]) {
     const pivot = new THREE.Group();
-    pivot.position.set(side * 0.105, -0.015, 0.13);
+    pivot.position.set(side * 0.098, -0.015, 0.14);
     pivot.scale.x = side;
-    const fin = finMesh((s) => {
+    pivot.add(finMesh((s) => {
       s.moveTo(0, 0);
-      s.bezierCurveTo(0.12, 0.01, 0.20, -0.04, 0.22, -0.11);
-      s.bezierCurveTo(0.16, -0.19, 0.07, -0.21, 0.0, -0.16);
+      s.bezierCurveTo(0.13, 0.01, 0.22, -0.04, 0.24, -0.12);
+      s.bezierCurveTo(0.17, -0.21, 0.07, -0.23, 0.0, -0.17);
       s.lineTo(0, 0);
-    }, { plane: 'horizontal', edgeScale: 1.08 });
-    pivot.add(fin);
+    }, { plane: 'horizontal', edgeScale: 1.06 }));
     flex.add(pivot);
     pectorals.push(pivot);
   }
 
   // ---- eyes: orange-rimmed ball, black pupil, glossy catchlight
-  const eyeWhiteMat = new THREE.MeshPhysicalMaterial({ color: 0xffd8a8, roughness: 0.25, clearcoat: 1 });
+  const irisMat = new THREE.MeshPhysicalMaterial({ color: 0xffd8a8, roughness: 0.25, clearcoat: 1 });
   const pupilMat = new THREE.MeshPhysicalMaterial({ color: 0x0a0705, roughness: 0.08, clearcoat: 1, clearcoatRoughness: 0.05 });
   const glintMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
   for (const side of [1, -1]) {
     const eye = new THREE.Group();
-    eye.position.set(side * 0.088, 0.075, 0.315);
-    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.052, 18, 14), eyeWhiteMat);
-    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.039, 18, 14), pupilMat);
-    pupil.position.set(side * 0.019, 0.002, 0.012);
+    // body half-width at this z is ~0.088, so keep the ball mostly embedded
+    eye.position.set(side * 0.062, 0.072, 0.315);
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.050, 18, 14), irisMat);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.038, 18, 14), pupilMat);
+    pupil.position.set(side * 0.019, 0.002, 0.011);
     const glint = new THREE.Mesh(new THREE.SphereGeometry(0.0105, 8, 6), glintMat);
-    glint.position.set(side * 0.036, 0.019, 0.026);
+    glint.position.set(side * 0.034, 0.019, 0.025);
     eye.add(ball, pupil, glint);
     flex.add(eye);
   }
 
-  // ---- mouth
   const mouth = new THREE.Mesh(
     new THREE.SphereGeometry(0.038, 14, 10),
     new THREE.MeshStandardMaterial({ color: 0x5d2b06, roughness: 0.5 })
   );
-  mouth.position.set(0, -0.048, 0.472);
+  mouth.position.set(0, -0.048, 0.468);
   mouth.scale.set(0.85, 0.5, 0.5);
   flex.add(mouth);
 
   return { fish, flex, bodyMat, tailPivot, dorsalPivot, analPivot, pectorals };
 }
 
+// margins keep the whole body (not just its origin) clear of the glass
 const BOUNDS = {
-  minX: -TANK.W / 2 + 0.3, maxX: TANK.W / 2 - 0.3,
-  minY: TANK.gravel + 0.35, maxY: TANK.water - 0.3,
-  minZ: -TANK.D / 2 + 0.34, maxZ: TANK.D / 2 - 0.34
+  minX: -TANK.W / 2 + 0.7, maxX: TANK.W / 2 - 0.7,
+  minY: TANK.gravel + 0.42, maxY: TANK.water - 0.34,
+  minZ: -TANK.D / 2 + 0.55, maxZ: TANK.D / 2 - 0.55
 };
-const randIn = (a, b) => a + Math.random() * (b - a);
 const randomWaypoint = (out) => out.set(
-  randIn(BOUNDS.minX, BOUNDS.maxX), randIn(BOUNDS.minY, BOUNDS.maxY), randIn(BOUNDS.minZ, BOUNDS.maxZ)
+  rand(BOUNDS.minX, BOUNDS.maxX), rand(BOUNDS.minY, BOUNDS.maxY), rand(BOUNDS.minZ, BOUNDS.maxZ)
 );
+
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
 class Fish {
   constructor(scale, speed) {
-    const parts = makeClownfish();
-    Object.assign(this, parts);
+    Object.assign(this, makeClownfish());
     this.fish.scale.setScalar(scale);
     this.speed = speed;                                   // units / second
     this.target = randomWaypoint(new THREE.Vector3());
-    this.velocity = new THREE.Vector3(randIn(-1, 1), 0, randIn(-1, 1)).normalize().multiplyScalar(speed);
-    this.fish.position.set(randIn(BOUNDS.minX, BOUNDS.maxX), randIn(BOUNDS.minY, BOUNDS.maxY), randIn(BOUNDS.minZ, BOUNDS.maxZ));
+    this.velocity = new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize().multiplyScalar(speed);
+    this.fish.position.set(rand(BOUNDS.minX, BOUNDS.maxX), rand(BOUNDS.minY, BOUNDS.maxY), rand(BOUNDS.minZ, BOUNDS.maxZ));
     this.phase = Math.random() * 6.28;
     this.bank = 0;
     this._desired = new THREE.Vector3();
+    this._dir = new THREE.Vector3();
     this._aim = new THREE.Object3D();
     this._q = new THREE.Quaternion();
     this._roll = new THREE.Quaternion();
@@ -664,13 +662,13 @@ class Fish {
     this.velocity.lerp(this._desired, Math.min(1, dt * 1.1));
 
     // soft wall repulsion keeps a margin without visible bouncing
-    const push = 0.55;
-    if (pos.x < BOUNDS.minX + push) this.velocity.x += (BOUNDS.minX + push - pos.x) * dt * 2.2;
-    if (pos.x > BOUNDS.maxX - push) this.velocity.x -= (pos.x - BOUNDS.maxX + push) * dt * 2.2;
-    if (pos.y < BOUNDS.minY + push) this.velocity.y += (BOUNDS.minY + push - pos.y) * dt * 2.6;
-    if (pos.y > BOUNDS.maxY - push) this.velocity.y -= (pos.y - BOUNDS.maxY + push) * dt * 2.6;
-    if (pos.z < BOUNDS.minZ + push) this.velocity.z += (BOUNDS.minZ + push - pos.z) * dt * 2.6;
-    if (pos.z > BOUNDS.maxZ - push) this.velocity.z -= (pos.z - BOUNDS.maxZ + push) * dt * 2.6;
+    const push = 0.55, k = dt * 2.4;
+    if (pos.x < BOUNDS.minX + push) this.velocity.x += (BOUNDS.minX + push - pos.x) * k;
+    if (pos.x > BOUNDS.maxX - push) this.velocity.x -= (pos.x - BOUNDS.maxX + push) * k;
+    if (pos.y < BOUNDS.minY + push) this.velocity.y += (BOUNDS.minY + push - pos.y) * k;
+    if (pos.y > BOUNDS.maxY - push) this.velocity.y -= (pos.y - BOUNDS.maxY + push) * k;
+    if (pos.z < BOUNDS.minZ + push) this.velocity.z += (BOUNDS.minZ + push - pos.z) * k;
+    if (pos.z > BOUNDS.maxZ - push) this.velocity.z -= (pos.z - BOUNDS.maxZ + push) * k;
 
     const sp = this.velocity.length();
     if (sp > 1e-4) {
@@ -679,7 +677,7 @@ class Fish {
       pos.y = THREE.MathUtils.clamp(pos.y, BOUNDS.minY, BOUNDS.maxY);
       pos.z = THREE.MathUtils.clamp(pos.z, BOUNDS.minZ, BOUNDS.maxZ);
 
-      const dir = this.velocity.clone().normalize();
+      const dir = this._dir.copy(this.velocity).divideScalar(sp);
       // bank into the turn, proportional to heading change
       const turn = dir.x * this._prevDir.z - dir.z * this._prevDir.x;
       this.bank = THREE.MathUtils.lerp(this.bank, THREE.MathUtils.clamp(turn * 26, -0.5, 0.5), Math.min(1, dt * 3));
@@ -687,8 +685,8 @@ class Fish {
 
       this._aim.position.copy(pos);
       this._aim.up.set(0, 1, 0);
-      this._aim.lookAt(pos.clone().add(dir));
-      this._q.copy(this._aim.quaternion).multiply(this._roll.setFromAxisAngle(new THREE.Vector3(0, 0, 1), this.bank));
+      this._aim.lookAt(pos.x + dir.x, pos.y + dir.y, pos.z + dir.z);
+      this._q.copy(this._aim.quaternion).multiply(this._roll.setFromAxisAngle(Z_AXIS, this.bank));
       this.fish.quaternion.slerp(this._q, Math.min(1, dt * 2.4));
     }
 
@@ -698,8 +696,8 @@ class Fish {
     this.tailPivot.rotation.y = wag * 0.35;
     this.dorsalPivot.rotation.y = wag * 0.09;
     this.analPivot.rotation.y = wag * 0.12;
-    this.pectorals[0].rotation.z = -0.22 + Math.sin(t * (beat * 1.35) + this.phase) * 0.45;
-    this.pectorals[1].rotation.z = -0.22 + Math.sin(t * (beat * 1.35) + this.phase + 0.6) * 0.45;
+    this.pectorals[0].rotation.z = -0.22 + Math.sin(t * beat * 1.35 + this.phase) * 0.45;
+    this.pectorals[1].rotation.z = -0.22 + Math.sin(t * beat * 1.35 + this.phase + 0.6) * 0.45;
     this.flex.rotation.y = wag * 0.05;
 
     const u = this.bodyMat.userData.uniforms;
@@ -713,21 +711,34 @@ const fishes = [new Fish(0.9, 0.42), new Fish(1.0, 0.55), new Fish(1.1, 0.68)];
 /* ---------------------------------- bubbles -------------------------- */
 const bubbleMaterial = new THREE.MeshPhysicalMaterial({
   color: 0xffffff,
-  transmission: 1,
+  transmission: 0.85,
   transparent: true,
-  opacity: 0.42,
-  roughness: 0.03,
+  opacity: 1,
+  roughness: 0.02,
   metalness: 0,
-  thickness: 0.03,
+  thickness: 0.02,
   ior: 1.33,
-  iridescence: 0.9,
-  iridescenceIOR: 1.3,
-  iridescenceThicknessRange: [120, 420],
-  envMapIntensity: 1.6,
+  iridescence: 1.0,
+  iridescenceIOR: 1.32,
+  iridescenceThicknessRange: [140, 460],
+  specularIntensity: 1,
+  envMapIntensity: 2.4,
   clearcoat: 1,
-  clearcoatRoughness: 0.02
+  clearcoatRoughness: 0.02,
+  depthWrite: false
 });
-const BUBBLE_GEO = new THREE.SphereGeometry(1, 14, 10);
+// A tiny fully-transmissive sphere is almost invisible, so add an explicit
+// fresnel rim: that thin bright outline is what actually reads as "bubble".
+bubbleMaterial.customProgramCacheKey = () => 'bubbleRim';
+bubbleMaterial.onBeforeCompile = (shader) => {
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <emissivemap_fragment>',
+    `#include <emissivemap_fragment>
+     float rim = pow(1.0 - clamp(dot(normalize(normal), normalize(vViewPosition)), 0.0, 1.0), 1.8);
+     totalEmissiveRadiance += vec3(0.80, 0.94, 1.0) * rim * 2.2 + vec3(0.22, 0.30, 0.38);`
+  );
+};
+const BUBBLE_GEO = new THREE.SphereGeometry(1, 16, 12);
 
 const streams = [
   { x: -1.72, z: 0.42, rate: 3.0, acc: 0 },
@@ -735,29 +746,29 @@ const streams = [
 ];
 const bubbles = [];
 const bubblePool = [];
-const MAX_BUBBLES = 44;
+const MAX_BUBBLES = 46;
 
 function spawnBubble(stream) {
   if (bubbles.length >= MAX_BUBBLES) return;
   const mesh = bubblePool.pop() || new THREE.Mesh(BUBBLE_GEO, bubbleMaterial);
-  const r = randIn(0.018, 0.052);
-  mesh.visible = true;
+  mesh.renderOrder = 6;
+  const r = rand(0.028, 0.070);
   mesh.scale.setScalar(r);
-  mesh.position.set(stream.x + randIn(-0.045, 0.045), TANK.gravel + 0.03, stream.z + randIn(-0.045, 0.045));
+  mesh.position.set(stream.x + rand(-0.045, 0.045), TANK.gravel + 0.03, stream.z + rand(-0.045, 0.045));
   scene.add(mesh);
   bubbles.push({
     mesh, r,
     baseX: mesh.position.x, baseZ: mesh.position.z,
-    rise: randIn(0.55, 0.95) + r * 4,
-    wobbleAmp: randIn(0.03, 0.085),
-    wobbleFreq: randIn(1.6, 3.4),
+    rise: rand(0.55, 0.95) + r * 4,
+    wobbleAmp: rand(0.03, 0.085),
+    wobbleFreq: rand(1.6, 3.4),
     phase: Math.random() * 6.28
   });
 }
 
 function updateBubbles(t, dt) {
   for (const s of streams) {
-    s.acc += dt * (s.rate + Math.sin(t * 0.7 + s.x) * 0.8);   // ~2-4 per second
+    s.acc += dt * (s.rate + Math.sin(t * 0.7 + s.x) * 0.8);   // ~2-4 per second per stream
     while (s.acc >= 1) { s.acc -= 1; spawnBubble(s); }
   }
   for (let i = bubbles.length - 1; i >= 0; i--) {
@@ -771,7 +782,6 @@ function updateBubbles(t, dt) {
 
     if (b.mesh.position.y >= TANK.water - 0.02) {
       scene.remove(b.mesh);
-      b.mesh.visible = false;
       bubblePool.push(b.mesh);
       bubbles.splice(i, 1);
     }
@@ -782,63 +792,59 @@ function updateBubbles(t, dt) {
 {
   const volume = new THREE.Mesh(
     new THREE.BoxGeometry(TANK.W - 0.02, TANK.water - TANK.gravel, TANK.D - 0.02),
-    new THREE.MeshBasicMaterial({ color: 0x1e88e5, transparent: true, opacity: 0.18, depthWrite: false, side: THREE.FrontSide })
+    new THREE.MeshBasicMaterial({ color: 0x1e88e5, transparent: true, opacity: 0.18, depthWrite: false })
   );
   volume.position.set(0, (TANK.water + TANK.gravel) / 2, 0);
   volume.renderOrder = 1;
   scene.add(volume);
 
-  const surface = new THREE.Mesh(
-    (() => { const g = new THREE.PlaneGeometry(TANK.W - 0.02, TANK.D - 0.02, 90, 54); g.rotateX(-Math.PI / 2); return g; })(),
-    new THREE.ShaderMaterial({
-      transparent: true,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-      uniforms: {
-        uTime,
-        uDeep: { value: new THREE.Color(0x0d47a1) },
-        uShallow: { value: new THREE.Color(0x81d4fa) },
-        uSky: { value: new THREE.Color(0xfff8e1) }
-      },
-      vertexShader: /* glsl */`
-        uniform float uTime;
-        varying vec3 vNrm; varying vec3 vWPos;
-        void main(){
-          vec3 p = position;
-          vec2 grad = vec2(0.0);
-          float h = 0.0;
-          vec2 d1 = normalize(vec2(1.0, 0.42)); float k1 = 3.1, a1 = 0.020, s1 = 1.25;
-          vec2 d2 = normalize(vec2(-0.6, 1.0)); float k2 = 4.7, a2 = 0.012, s2 = 1.7;
-          vec2 d3 = normalize(vec2(0.85, -0.7)); float k3 = 7.9, a3 = 0.006, s3 = 2.6;
-          float p1 = dot(p.xz, d1) * k1 + uTime * s1;
-          float p2 = dot(p.xz, d2) * k2 - uTime * s2;
-          float p3 = dot(p.xz, d3) * k3 + uTime * s3;
-          h += sin(p1) * a1 + sin(p2) * a2 + sin(p3) * a3;
-          grad += cos(p1) * a1 * k1 * d1 - cos(p2) * a2 * k2 * d2 + cos(p3) * a3 * k3 * d3;
-          p.y += h;
-          vNrm = normalize(vec3(-grad.x, 1.0, -grad.y));
-          vWPos = (modelMatrix * vec4(p, 1.0)).xyz;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
-        }`,
-      fragmentShader: /* glsl */`
-        uniform vec3 uDeep; uniform vec3 uShallow; uniform vec3 uSky;
-        varying vec3 vNrm; varying vec3 vWPos;
-        void main(){
-          vec3 V = normalize(cameraPosition - vWPos);
-          vec3 N = normalize(vNrm);
-          if (dot(N, V) < 0.0) N = -N;
-          float fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.0);
-          vec3 L = normalize(vec3(0.55, 1.0, 0.75));
-          float spec = pow(max(dot(reflect(-L, N), V), 0.0), 110.0);
-          vec3 col = mix(uDeep, uShallow, fres * 0.9 + 0.12);
-          col += uSky * spec * 2.2;
-          float alpha = 0.20 + fres * 0.55;
-          gl_FragColor = vec4(col, alpha);
-          #include <tonemapping_fragment>
-          #include <colorspace_fragment>
-        }`
-    })
-  );
+  const surfGeo = new THREE.PlaneGeometry(TANK.W - 0.02, TANK.D - 0.02, 90, 54);
+  surfGeo.rotateX(-Math.PI / 2);
+  const surface = new THREE.Mesh(surfGeo, new THREE.ShaderMaterial({
+    transparent: true,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    uniforms: {
+      uTime,
+      uDeep: { value: new THREE.Color(0x0d47a1) },
+      uShallow: { value: new THREE.Color(0x81d4fa) },
+      uSky: { value: new THREE.Color(0xfff8e1) }
+    },
+    vertexShader: /* glsl */`
+      uniform float uTime;
+      varying vec3 vNrm; varying vec3 vWPos;
+      void main(){
+        vec3 p = position;
+        // three crossing gerstner-ish ripples; analytic gradient drives the normal
+        vec2 d1 = normalize(vec2(1.0, 0.42)); float k1 = 3.1, a1 = 0.020, s1 = 1.25;
+        vec2 d2 = normalize(vec2(-0.6, 1.0)); float k2 = 4.7, a2 = 0.012, s2 = 1.7;
+        vec2 d3 = normalize(vec2(0.85, -0.7)); float k3 = 7.9, a3 = 0.006, s3 = 2.6;
+        float p1 = dot(p.xz, d1) * k1 + uTime * s1;
+        float p2 = dot(p.xz, d2) * k2 - uTime * s2;
+        float p3 = dot(p.xz, d3) * k3 + uTime * s3;
+        p.y += sin(p1) * a1 + sin(p2) * a2 + sin(p3) * a3;
+        vec2 grad = cos(p1) * a1 * k1 * d1 - cos(p2) * a2 * k2 * d2 + cos(p3) * a3 * k3 * d3;
+        vNrm = normalize(vec3(-grad.x, 1.0, -grad.y));
+        vWPos = (modelMatrix * vec4(p, 1.0)).xyz;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+      }`,
+    fragmentShader: /* glsl */`
+      uniform vec3 uDeep; uniform vec3 uShallow; uniform vec3 uSky;
+      varying vec3 vNrm; varying vec3 vWPos;
+      void main(){
+        vec3 V = normalize(cameraPosition - vWPos);
+        vec3 N = normalize(vNrm);
+        if (dot(N, V) < 0.0) N = -N;
+        float fres = pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.0);
+        vec3 L = normalize(vec3(0.55, 1.0, 0.75));
+        float spec = pow(max(dot(reflect(-L, N), V), 0.0), 110.0);
+        vec3 col = mix(uDeep, uShallow, fres * 0.55 + 0.10);
+        col += uSky * spec * 1.1;
+        gl_FragColor = vec4(col, 0.16 + fres * 0.34);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`
+  }));
   surface.position.y = TANK.water;
   surface.renderOrder = 2;
   scene.add(surface);
@@ -859,15 +865,15 @@ function updateBubbles(t, dt) {
         float edge = smoothstep(0.0, 0.35, vUv.x) * smoothstep(1.0, 0.65, vUv.x);
         float fall = pow(1.0 - vUv.y, 1.6);
         float flick = 0.75 + 0.25 * sin(uTime * 0.9 + vUv.x * 6.0);
-        gl_FragColor = vec4(uColor * edge * fall * 0.085 * flick, edge * fall * 0.1 * flick);
+        float a = edge * fall * flick;
+        gl_FragColor = vec4(uColor * a * 0.10, a * 0.12);
       }`
   });
   const rays = new THREE.Group();
   for (let i = 0; i < 5; i++) {
-    const w = 0.5 + Math.random() * 0.55;
-    const beam = new THREE.Mesh(new THREE.PlaneGeometry(w, TANK.water - TANK.gravel), rayMat);
-    beam.position.set(-2.1 + i * 1.05 + Math.random() * 0.3, (TANK.water + TANK.gravel) / 2, -0.4 + Math.random() * 0.8);
-    beam.rotation.set(0, Math.random() * Math.PI, (Math.random() - 0.5) * 0.16);
+    const beam = new THREE.Mesh(new THREE.PlaneGeometry(rand(0.5, 1.05), TANK.water - TANK.gravel), rayMat);
+    beam.position.set(-2.1 + i * 1.05 + rand(0, 0.3), (TANK.water + TANK.gravel) / 2, rand(-0.4, 0.4));
+    beam.rotation.set(0, Math.random() * Math.PI, rand(-0.08, 0.08));
     rays.add(beam);
   }
   rays.renderOrder = 3;
@@ -886,8 +892,7 @@ function onResize() {
 }
 window.addEventListener('resize', onResize);
 
-function animate() {
-  const dt = Math.min(clock.getDelta(), 0.05);
+function step(dt, render = true) {
   elapsed += dt;
   uTime.value = elapsed;
 
@@ -896,20 +901,39 @@ function animate() {
 
   lamp.intensity = 0.8 + Math.sin(elapsed * 1.7) * 0.04;   // faint lamp shimmer
   controls.update();
-  renderer.render(scene, camera);
+  if (render) renderer.render(scene, camera);
+}
+
+function animate() {
+  step(Math.min(clock.getDelta(), 0.05));
   requestAnimationFrame(animate);
 }
 requestAnimationFrame(animate);
 
+// ?cam=x,y,z,tx,ty,tz frames a fixed viewpoint (used for capturing stills).
+{
+  const cam = new URLSearchParams(location.search).get('cam');
+  if (cam) {
+    const n = cam.split(',').map(Number);
+    if (n.length === 6 && n.every(Number.isFinite)) {
+      camera.position.set(n[0], n[1], n[2]);
+      controls.target.set(n[3], n[4], n[5]);
+      controls.update();
+    }
+  }
+}
+
 window.__aquariumReady = true;
+// read-only inspection hook; step() also lets headless checks advance the
+// simulation deterministically where requestAnimationFrame does not run.
+window.__aquarium = { scene, camera, controls, fishes, bubbles, renderer, step, get time() { return elapsed; } };
 </script>
 <script>
   // surface module/CDN failures instead of dying silently
   window.addEventListener('error', (e) => {
     if (window.__aquariumReady) return;
-    const el = document.getElementById('fallback');
     document.getElementById('fallback-msg').textContent = String(e.message || e.error || 'unknown error');
-    el.classList.add('show');
+    document.getElementById('fallback').classList.add('show');
   });
 </script>
 </body>
