@@ -397,18 +397,21 @@ function makeBlade(color, h, w, phase) {
 
 {
   const greens = [0x2e7d32, 0x388e3c, 0x1b5e20, 0x4caf50, 0x33691e];
-  // back edge and corners, kept clear of the glass even at full sway
-  const spots = [[-2.15, -1.02], [-1.05, -1.15], [2.2, -1.06], [1.2, -1.2], [-2.3, 0.72], [2.32, 0.6]];
+  // five clusters: three along the back glass, one in each front corner
+  const spots = [[-2.15, -0.8], [-0.9, -0.8], [2.2, -0.8], [-2.3, 0.7], [2.32, 0.62]];
   for (const [x, z] of spots) {
     const cluster = new THREE.Group();
-    cluster.position.set(x + rand(-0.1, 0.1), TANK.gravel - 0.04, z + rand(-0.08, 0.08));
+    cluster.position.set(x + rand(-0.1, 0.1), TANK.gravel - 0.04, z + rand(-0.06, 0.06));
+    // rotation.y that aims a blade's local +z (its forward arc) at the tank centre
+    const inward = Math.atan2(-cluster.position.x, -cluster.position.z);
     const n = 4 + ((Math.random() * 5) | 0);      // 4-8 blades
     for (let i = 0; i < n; i++) {
       const h = rand(1.05, 2.4);
       const blade = makeBlade(greens[(Math.random() * greens.length) | 0], h, rand(0.13, 0.23), rand(0, Math.PI * 2));
-      blade.position.set(rand(-0.16, 0.16), 0, rand(-0.14, 0.14));
-      blade.rotation.y = rand(0, Math.PI * 2);
-      blade.rotation.z = rand(-0.14, 0.14);
+      blade.position.set(rand(-0.16, 0.16), 0, rand(-0.1, 0.1));
+      // keep arcs (and their sway) pointed into the tank so tall tips never breach the glass
+      blade.rotation.y = inward + rand(-0.8, 0.8);
+      blade.rotation.z = rand(-0.06, 0.06);
       cluster.add(blade);
     }
     scene.add(cluster);
@@ -419,7 +422,7 @@ function makeBlade(color, h, w, phase) {
 const FISH_COL = {
   body: new THREE.Color(0xff6d00),
   belly: new THREE.Color(0xffa040),
-  back: new THREE.Color(0xe65100),
+  back: new THREE.Color(0xf25c00),
   white: new THREE.Color(0xfff8f2),
   black: new THREE.Color(0x1a1108)
 };
@@ -444,9 +447,9 @@ const FISH_BODY_GEO = makeFishBodyGeometry();
 
 function makeFishBodyMaterial() {
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0xff6d00, roughness: 0.32, metalness: 0.03,
-    clearcoat: 0.75, clearcoatRoughness: 0.2, sheen: 0.35,
-    sheenColor: new THREE.Color(0xfff3e0), envMapIntensity: 0.9
+    color: 0xff6d00, roughness: 0.42, metalness: 0.0,
+    clearcoat: 0.45, clearcoatRoughness: 0.3, sheen: 0.2,
+    sheenColor: new THREE.Color(0xfff3e0), envMapIntensity: 0.55
   });
   mat.customProgramCacheKey = () => 'clownfishStripes';
   mat.userData.uniforms = {
@@ -620,15 +623,15 @@ function makeClownfish() {
   return { fish, flex, bodyMat, tailPivot, dorsalPivot, analPivot, pectorals };
 }
 
-// margins keep the whole body (not just its origin) clear of the glass
-const BOUNDS = {
-  minX: -TANK.W / 2 + 0.7, maxX: TANK.W / 2 - 0.7,
-  minY: TANK.gravel + 0.42, maxY: TANK.water - 0.34,
-  minZ: -TANK.D / 2 + 0.55, maxZ: TANK.D / 2 - 0.55
+// Walls the fish's whole bounding box must stay 0.3 units inside of.
+const WALL_MARGIN = 0.3;
+const LIMITS = {
+  minX: -TANK.W / 2 + WALL_MARGIN, maxX: TANK.W / 2 - WALL_MARGIN,
+  minY: TANK.gravel + WALL_MARGIN + 0.08, maxY: TANK.water - WALL_MARGIN,
+  minZ: -TANK.D / 2 + WALL_MARGIN, maxZ: TANK.D / 2 - WALL_MARGIN
 };
-const randomWaypoint = (out) => out.set(
-  rand(BOUNDS.minX, BOUNDS.maxX), rand(BOUNDS.minY, BOUNDS.maxY), rand(BOUNDS.minZ, BOUNDS.maxZ)
-);
+// waypoints for the fish origin; the swept box (nose to tail tip) still has room to swing
+const randomWaypoint = (out) => out.set(rand(-2.0, 2.0), rand(1.0, 3.0), rand(-0.6, 0.6));
 
 const Z_AXIS = new THREE.Vector3(0, 0, 1);
 
@@ -639,7 +642,7 @@ class Fish {
     this.speed = speed;                                   // units / second
     this.target = randomWaypoint(new THREE.Vector3());
     this.velocity = new THREE.Vector3(rand(-1, 1), 0, rand(-1, 1)).normalize().multiplyScalar(speed);
-    this.fish.position.set(rand(BOUNDS.minX, BOUNDS.maxX), rand(BOUNDS.minY, BOUNDS.maxY), rand(BOUNDS.minZ, BOUNDS.maxZ));
+    this.fish.position.copy(randomWaypoint(new THREE.Vector3()));
     this.phase = Math.random() * 6.28;
     this.bank = 0;
     this._desired = new THREE.Vector3();
@@ -648,6 +651,7 @@ class Fish {
     this._q = new THREE.Quaternion();
     this._roll = new THREE.Quaternion();
     this._prevDir = new THREE.Vector3(0, 0, 1);
+    this._box = new THREE.Box3();
     scene.add(this.fish);
   }
 
@@ -661,21 +665,20 @@ class Fish {
     this._desired.y *= 0.55;                              // fish prefer level swimming
     this.velocity.lerp(this._desired, Math.min(1, dt * 1.1));
 
-    // soft wall repulsion keeps a margin without visible bouncing
-    const push = 0.55, k = dt * 2.4;
-    if (pos.x < BOUNDS.minX + push) this.velocity.x += (BOUNDS.minX + push - pos.x) * k;
-    if (pos.x > BOUNDS.maxX - push) this.velocity.x -= (pos.x - BOUNDS.maxX + push) * k;
-    if (pos.y < BOUNDS.minY + push) this.velocity.y += (BOUNDS.minY + push - pos.y) * k;
-    if (pos.y > BOUNDS.maxY - push) this.velocity.y -= (pos.y - BOUNDS.maxY + push) * k;
-    if (pos.z < BOUNDS.minZ + push) this.velocity.z += (BOUNDS.minZ + push - pos.z) * k;
-    if (pos.z > BOUNDS.maxZ - push) this.velocity.z -= (pos.z - BOUNDS.maxZ + push) * k;
+    // soft wall repulsion on the swept body box (not the origin) so the tail tip
+    // never breaches the margin, without visible bouncing
+    const box = this._box.setFromObject(this.fish);
+    const push = 0.45, k = dt * 3.0;
+    if (box.min.x < LIMITS.minX + push) this.velocity.x += (LIMITS.minX + push - box.min.x) * k;
+    if (box.max.x > LIMITS.maxX - push) this.velocity.x -= (box.max.x - LIMITS.maxX + push) * k;
+    if (box.min.y < LIMITS.minY + push) this.velocity.y += (LIMITS.minY + push - box.min.y) * k;
+    if (box.max.y > LIMITS.maxY - push) this.velocity.y -= (box.max.y - LIMITS.maxY + push) * k;
+    if (box.min.z < LIMITS.minZ + push) this.velocity.z += (LIMITS.minZ + push - box.min.z) * k;
+    if (box.max.z > LIMITS.maxZ - push) this.velocity.z -= (box.max.z - LIMITS.maxZ + push) * k;
 
     const sp = this.velocity.length();
     if (sp > 1e-4) {
       pos.addScaledVector(this.velocity, dt);
-      pos.x = THREE.MathUtils.clamp(pos.x, BOUNDS.minX, BOUNDS.maxX);
-      pos.y = THREE.MathUtils.clamp(pos.y, BOUNDS.minY, BOUNDS.maxY);
-      pos.z = THREE.MathUtils.clamp(pos.z, BOUNDS.minZ, BOUNDS.maxZ);
 
       const dir = this._dir.copy(this.velocity).divideScalar(sp);
       // bank into the turn, proportional to heading change
@@ -703,6 +706,15 @@ class Fish {
     const u = this.bodyMat.userData.uniforms;
     u.uSpeed.value = beat;
     u.uWave.value = 0.03 + sp * 0.055;
+
+    // hard guarantee after the pose settles: shift the whole fish back inside the margin
+    box.setFromObject(this.fish);
+    if (box.min.x < LIMITS.minX) pos.x += LIMITS.minX - box.min.x;
+    if (box.max.x > LIMITS.maxX) pos.x -= box.max.x - LIMITS.maxX;
+    if (box.min.y < LIMITS.minY) pos.y += LIMITS.minY - box.min.y;
+    if (box.max.y > LIMITS.maxY) pos.y -= box.max.y - LIMITS.maxY;
+    if (box.min.z < LIMITS.minZ) pos.z += LIMITS.minZ - box.min.z;
+    if (box.max.z > LIMITS.maxZ) pos.z -= box.max.z - LIMITS.maxZ;
   }
 }
 
